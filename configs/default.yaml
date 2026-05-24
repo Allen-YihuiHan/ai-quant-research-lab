@@ -1,0 +1,28 @@
+universe: us_phase1
+
+data:
+  source: yfinance
+  start_date: "2015-01-01"
+  end_date: "2025-01-01"
+  cache_dir: data/cache
+  raw_dir: data/raw
+  processed_dir: data/processed
+
+features:
+  momentum_windows: [5, 20, 60]
+  volatility_window: 20
+  ma_windows: [20, 60]
+  rsi_window: 14
+
+backtest:
+  initial_cash: 1_000_000
+  transaction_cost: 0.001   # 10 bps
+  rebalance_freq: "W"
+  top_k: 10
+  max_weight: 0.10
+
+evaluation:
+  ic_horizons: [1, 5, 10, 20]
+  n_groups: 5
+  risk_free_rate: 0.0
+  periods_per_year: 252

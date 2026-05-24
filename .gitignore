@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+.env
+
+# Data (never commit raw/cached market data)
+data/raw/
+data/cache/
+data/processed/
+
+# Notebooks output
+notebooks/.ipynb_checkpoints/
+
+# Reports / figures (generated artifacts)
+reports/figures/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
