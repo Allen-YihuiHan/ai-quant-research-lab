@@ -37,6 +37,13 @@ def load_ohlcv(
         downloaded = _batch_download(missing, start_date, end_date, cache_dir)
         frames.extend(downloaded.values())
 
+    if not frames:
+        raise RuntimeError(
+            f"No data loaded for symbols {symbols}. "
+            "All downloads failed and no cache was found. "
+            "Check that cache_dir points to the right location, or wait a few minutes before retrying."
+        )
+
     combined = pd.concat(frames)
     combined = combined.reset_index().set_index(["date", "symbol"]).sort_index()
     return combined
@@ -74,7 +81,7 @@ def _batch_download(
     end_date: str,
     cache_dir: Union[str, Path, None],
     retries: int = 3,
-    backoff: float = 10.0,
+    backoff: float = 30.0,
 ) -> dict[str, pd.DataFrame]:
     """Download multiple symbols in a single yf.download() call with retry."""
     logger.info("Batch downloading %d symbol(s): %s", len(symbols), symbols)
