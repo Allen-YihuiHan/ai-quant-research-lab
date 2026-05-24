@@ -97,6 +97,10 @@ def _batch_download(
                 progress=False,
                 group_by="ticker",
             )
+            # yf.download swallows rate-limit errors and returns an empty
+            # DataFrame instead of raising — treat empty as a failure.
+            if raw is None or raw.empty:
+                raise RuntimeError("yf.download returned empty data (rate limited or no data)")
             break
         except Exception as exc:
             logger.warning("Attempt %d/%d failed: %s", attempt, retries, exc)
