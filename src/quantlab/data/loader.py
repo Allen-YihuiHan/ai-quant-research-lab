@@ -23,25 +23,28 @@ def load_ohlcv(
     Returns a MultiIndex DataFrame indexed by (date, symbol).
     Columns: open, high, low, close, volume
 
-    Uses yf.download() for batch requests to avoid per-ticker rate limits.
-    Results are cached per-symbol as parquet files.
+    Uses Ticker.history() per symbol (more reliable than yf.download()).
+    Results are cached as parquet files.
     """
     if isinstance(symbols, str):
         symbols = [symbols]
 
     cached, missing = _split_cache(symbols, start_date, end_date, cache_dir)
-
     frames: list[pd.DataFrame] = list(cached.values())
 
-    if missing:
-        downloaded = _batch_download(missing, start_date, end_date, cache_dir)
-        frames.extend(downloaded.values())
+    for symbol in missing:
+        df = _download_one(symbol, start_date, end_date, retries=3, backoff=15.0)
+        if df is None or df.empty:
+            logger.warning("No data returned for %s — skipping", symbol)
+            continue
+        df["symbol"] = symbol
+        _save_cache(df.drop(columns="symbol"), cache_dir, symbol, start_date, end_date)
+        frames.append(df)
 
     if not frames:
         raise RuntimeError(
             f"No data loaded for symbols {symbols}. "
-            "All downloads failed and no cache was found. "
-            "Check that cache_dir points to the right location, or wait a few minutes before retrying."
+            "All downloads failed and no cache was found."
         )
 
     combined = pd.concat(frames)
@@ -51,16 +54,47 @@ def load_ohlcv(
 
 # ── internal helpers ──────────────────────────────────────────────────────────
 
+def _download_one(
+    symbol: str,
+    start_date: str,
+    end_date: str,
+    retries: int = 3,
+    backoff: float = 15.0,
+) -> pd.DataFrame | None:
+    """Download a single symbol via Ticker.history() with retry."""
+    logger.info("Downloading %s", symbol)
+    for attempt in range(1, retries + 1):
+        try:
+            df = yf.Ticker(symbol).history(
+                start=start_date,
+                end=end_date,
+                auto_adjust=True,
+            )
+            if df.empty:
+                raise RuntimeError("empty response")
+            df.index = df.index.tz_localize(None)
+            df.columns = df.columns.str.lower()
+            available = [c for c in _OHLCV_COLS if c in df.columns]
+            df = df[available].dropna(how="all")
+            df.index.name = "date"
+            return df
+        except Exception as exc:
+            logger.warning("Attempt %d/%d failed for %s: %s", attempt, retries, symbol, exc)
+            if attempt < retries:
+                wait = backoff * attempt
+                logger.info("Waiting %.0fs before retry…", wait)
+                time.sleep(wait)
+    return None
+
+
 def _split_cache(
     symbols: list[str],
     start_date: str,
     end_date: str,
     cache_dir: Union[str, Path, None],
 ) -> tuple[dict[str, pd.DataFrame], list[str]]:
-    """Return (cached_frames, symbols_to_download)."""
     cached: dict[str, pd.DataFrame] = {}
     missing: list[str] = []
-
     for symbol in symbols:
         if cache_dir is not None:
             path = _cache_path(cache_dir, symbol, start_date, end_date)
@@ -71,85 +105,22 @@ def _split_cache(
                 cached[symbol] = df
                 continue
         missing.append(symbol)
-
     return cached, missing
 
 
-def _batch_download(
-    symbols: list[str],
+def _save_cache(
+    df: pd.DataFrame,
+    cache_dir: Union[str, Path, None],
+    symbol: str,
     start_date: str,
     end_date: str,
-    cache_dir: Union[str, Path, None],
-    retries: int = 3,
-    backoff: float = 30.0,
-) -> dict[str, pd.DataFrame]:
-    """Download multiple symbols in a single yf.download() call with retry."""
-    logger.info("Batch downloading %d symbol(s): %s", len(symbols), symbols)
-
-    raw = None
-    for attempt in range(1, retries + 1):
-        try:
-            raw = yf.download(
-                tickers=symbols,
-                start=start_date,
-                end=end_date,
-                auto_adjust=True,
-                progress=False,
-                group_by="ticker",
-            )
-            # yf.download swallows rate-limit errors and returns an empty
-            # DataFrame instead of raising — treat empty as a failure.
-            if raw is None or raw.empty:
-                raise RuntimeError("yf.download returned empty data (rate limited or no data)")
-            break
-        except Exception as exc:
-            logger.warning("Attempt %d/%d failed: %s", attempt, retries, exc)
-            if attempt < retries:
-                wait = backoff * attempt
-                logger.info("Waiting %.0fs before retry…", wait)
-                time.sleep(wait)
-            else:
-                raise
-
-    result: dict[str, pd.DataFrame] = {}
-    for symbol in symbols:
-        df = _extract_symbol(raw, symbol, symbols)
-        if df is None or df.empty:
-            logger.warning("No data returned for %s — skipping", symbol)
-            continue
-
-        df["symbol"] = symbol
-        result[symbol] = df
-
-        if cache_dir is not None:
-            path = _cache_path(cache_dir, symbol, start_date, end_date)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            df.drop(columns="symbol").to_parquet(path)
-            logger.info("Cached %s → %s", symbol, path)
-
-    return result
-
-
-def _extract_symbol(
-    raw: pd.DataFrame,
-    symbol: str,
-    all_symbols: list[str],
-) -> pd.DataFrame | None:
-    """Pull a single symbol out of the multi-ticker yf.download() result."""
-    try:
-        if len(all_symbols) == 1:
-            df = raw.copy()
-        else:
-            df = raw[symbol].copy()
-    except KeyError:
-        return None
-
-    df.index = df.index.tz_localize(None)
-    df.columns = df.columns.str.lower()
-    available = [c for c in _OHLCV_COLS if c in df.columns]
-    df = df[available].dropna(how="all")
-    df.index.name = "date"
-    return df
+) -> None:
+    if cache_dir is None:
+        return
+    path = _cache_path(cache_dir, symbol, start_date, end_date)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(path)
+    logger.info("Cached %s → %s", symbol, path)
 
 
 def _cache_path(
